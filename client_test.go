@@ -10,13 +10,14 @@ import (
 	"golang.org/x/net/context"
 )
 
-var testClient = Client{Debug: true}
-
 const (
 	dwlURL    string = "https://www.youtube.com/watch?v=rFejpH_tAHM"
 	streamURL string = "https://www.youtube.com/watch?v=a9LDPn-MO4I"
 	errURL    string = "https://www.youtube.com/watch?v=I8oGsuQ"
 )
+
+var testClient = Client{}
+var testWebClient = Client{client: &WebClient}
 
 func TestParseVideo(t *testing.T) {
 	video, err := testClient.GetVideo(dwlURL)
@@ -106,6 +107,34 @@ func TestGetVideoWithoutManifestURL(t *testing.T) {
 	// assert.Equal("2015-12-02 00:00:00 +0000 UTC", video.PublishDate.String())
 }
 
+func TestWebClientGetVideoWithoutManifestURL(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+
+	video, err := testWebClient.GetVideo(dwlURL)
+	require.NoError(err, "get video")
+	require.NotNil(video)
+
+	assert.NotEmpty(video.Thumbnails)
+	assert.Greater(len(video.Thumbnails), 0)
+	assert.NotEmpty(video.Thumbnails[0].URL)
+	assert.Empty(video.HLSManifestURL)
+	assert.Empty(video.DASHManifestURL)
+
+	assert.NotEmpty(video.CaptionTracks)
+	assert.Greater(len(video.CaptionTracks), 0)
+	assert.NotEmpty(video.CaptionTracks[0].BaseURL)
+
+	assert.Equal("rFejpH_tAHM", video.ID)
+	assert.Equal("dotGo 2015 - Rob Pike - Simplicity is Complicated", video.Title)
+	assert.Equal("dotconferences", video.Author)
+	assert.GreaterOrEqual(video.Duration, 1390*time.Second)
+	assert.Contains(video.Description, "Go is often described as a simple language.")
+
+	// Publishing date and channel handle are present in web client
+	assert.Equal("2015-12-02 00:00:00 +0000 UTC", video.PublishDate.String())
+	assert.Equal("@dotconferences", video.ChannelHandle)
+}
+
 func TestGetVideoWithManifestURL(t *testing.T) {
 	assert, require := assert.New(t), require.New(t)
 
@@ -129,6 +158,14 @@ func TestGetVideoWithManifestURL(t *testing.T) {
 func TestGetStream(t *testing.T) {
 	assert, require := assert.New(t), require.New(t)
 
+	expectedSize := 988479
+
+	// Create testclient to enforce re-using of routines
+	testClient := Client{
+		MaxRoutines: 10,
+		ChunkSize:   int64(expectedSize) / 11,
+	}
+
 	// Download should not last longer than a minute.
 	// Otherwise we assume Youtube is throtteling us.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -141,7 +178,7 @@ func TestGetStream(t *testing.T) {
 
 	reader, size, err := testClient.GetStreamContext(ctx, video, &video.Formats[0])
 	require.NoError(err)
-	assert.EqualValues(988479, size)
+	assert.EqualValues(expectedSize, size)
 
 	data, err := io.ReadAll(reader)
 	require.NoError(err)

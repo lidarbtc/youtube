@@ -7,12 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
 	"strconv"
 	"sync/atomic"
+
+	"log/slog"
 )
 
 const (
@@ -32,9 +33,6 @@ var DefaultClient = AndroidClient
 
 // Client offers methods to download video metadata and video streams.
 type Client struct {
-	// Debug enables debugging output through log package
-	Debug bool
-
 	// HTTPClient can be used to set a custom HTTP client.
 	// If not set, http.DefaultClient will be used
 	HTTPClient *http.Client
@@ -338,7 +336,6 @@ func (c *Client) GetStreamContext(ctx context.Context, video *Video, format *For
 	} else {
 		// we have length information, let's download by chunks!
 		c.downloadChunked(ctx, req, w, format)
-
 	}
 
 	return r, contentLength, nil
@@ -388,19 +385,21 @@ func (c *Client) downloadChunked(ctx context.Context, req *http.Request, w *io.P
 	currentChunk := atomic.Uint32{}
 	for i := 0; i < maxRoutines; i++ {
 		go func() {
-			i := int(currentChunk.Add(1)) - 1
-			if i > len(chunks) {
-				// no more chunks
-				return
-			}
+			for {
+				chunkIndex := int(currentChunk.Add(1)) - 1
+				if chunkIndex >= len(chunks) {
+					// no more chunks
+					return
+				}
 
-			chunk := &chunks[i]
-			err := c.downloadChunk(req.Clone(cancelCtx), chunk)
-			close(chunk.data)
+				chunk := &chunks[chunkIndex]
+				err := c.downloadChunk(req.Clone(cancelCtx), chunk)
+				close(chunk.data)
 
-			if err != nil {
-				abort(err)
-				return
+				if err != nil {
+					abort(err)
+					return
+				}
 			}
 		}()
 	}
@@ -410,6 +409,7 @@ func (c *Client) downloadChunked(ctx context.Context, req *http.Request, w *io.P
 		for i := 0; i < len(chunks); i++ {
 			select {
 			case <-cancelCtx.Done():
+				abort(context.Canceled)
 				return
 			case data := <-chunks[i].data:
 				_, err := io.Copy(w, bytes.NewBuffer(data))
@@ -468,10 +468,6 @@ func (c *Client) httpDo(req *http.Request) (*http.Response, error) {
 		client = http.DefaultClient
 	}
 
-	if c.Debug {
-		log.Println(req.Method, req.URL)
-	}
-
 	req.Header.Set("User-Agent", c.client.userAgent)
 	req.Header.Set("Origin", "https://youtube.com")
 	req.Header.Set("Sec-Fetch-Mode", "navigate")
@@ -489,8 +485,12 @@ func (c *Client) httpDo(req *http.Request) (*http.Response, error) {
 
 	res, err := client.Do(req)
 
-	if c.Debug && res != nil {
-		log.Println(res.Status)
+	log := slog.With("method", req.Method, "url", req.URL)
+
+	if err != nil {
+		log.Debug("HTTP request failed", "error", err)
+	} else {
+		log.Debug("HTTP request succeeded", "status", res.Status)
 	}
 
 	return res, err
@@ -578,7 +578,7 @@ func (c *Client) downloadChunk(req *http.Request, chunk *chunk) error {
 
 	resp, err := c.httpDo(req)
 	if err != nil {
-		return ErrUnexpectedStatusCode(resp.StatusCode)
+		return err
 	}
 	defer resp.Body.Close()
 
